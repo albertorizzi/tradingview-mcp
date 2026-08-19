@@ -41,8 +41,9 @@ dependencies = [
 ]
 
 [project.scripts]
-# Entry point now points to packaged module
-tradingview-mcp = "tradingview_mcp.server:main"
+# Deployment-aware entry point adds optional remote-host allowlisting before
+# delegating to the original server CLI.
+tradingview-mcp = "tradingview_mcp.hosting:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
