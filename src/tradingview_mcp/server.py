@@ -15,6 +15,14 @@ import asyncio
 import os
 from typing import Optional
 
+# Eagerly import pandas on the main thread. Several tools route through
+# tradingview_screener's bare Query(), whose first call imports pandas lazily —
+# and under the stdio server that first import happens inside an
+# anyio.to_thread worker, deadlocking against the interpreter's import lock
+# while the event loop awaits the worker (issue #91: seven tools hung forever
+# on a fresh stdio process). Preloading here makes the in-worker import a no-op.
+import pandas  # noqa: F401
+
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
