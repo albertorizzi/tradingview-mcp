@@ -36,6 +36,21 @@ STOCK_EXCHANGES: Set[str] = {
     "sse", "szse", "chn",
     "twse", "tpex",
     "tadawul", "tasi",                  # Saudi Stock Exchange (Tadawul) — All Share Index (TASI)
+    # European + Canadian stock markets. The first name on each line is the
+    # venue's canonical name (its coinlist file); the rest are aliases that
+    # COINLIST_ALIASES points at the same file.
+    "epa", "paris", "enx",              # Euronext Paris
+    "ams", "aex",                       # Euronext Amsterdam
+    "bru", "enb",                       # Euronext Brussels
+    "lis", "elp",                       # Euronext Lisbon
+    "mil", "milan", "bit",              # Borsa Italiana
+    "lse", "lon",                       # London Stock Exchange
+    "six", "swx",                       # SIX Swiss Exchange
+    "bme",                              # Bolsa de Madrid
+    "tsx",                              # Toronto Stock Exchange
+    "tsxv", "xsx", "ventures",          # TSX Venture Exchange
+    "xetra", "xetr",                    # Xetra
+    "fwb", "fra",                       # Börse Frankfurt
 }
 
 EXCHANGE_SCREENER = {
@@ -80,6 +95,19 @@ EXCHANGE_SCREENER = {
     # Saudi Stock Market (Tadawul) — TradingView scanner uses /ksa/
     "tadawul": "ksa",
     "tasi": "ksa",          # alias: Tadawul All Share Index
+    # ── European + Canadian stock markets (TradingView country slugs) ──
+    "epa": "france", "paris": "france", "enx": "france",     # Euronext Paris
+    "ams": "netherlands", "aex": "netherlands",              # Euronext Amsterdam
+    "bru": "belgium", "enb": "belgium",                      # Euronext Brussels
+    "lis": "portugal", "elp": "portugal",                    # Euronext Lisbon
+    "mil": "italy", "milan": "italy", "bit": "italy",         # Borsa Italiana
+    "lse": "uk", "lon": "uk",                                 # London
+    "six": "switzerland", "swx": "switzerland",               # SIX Swiss Exchange
+    "bme": "spain",                                           # Bolsa de Madrid
+    "tsx": "canada",                                          # Toronto
+    "tsxv": "canada", "xsx": "canada", "ventures": "canada",  # TSX Venture
+    "xetra": "germany", "xetr": "germany",                    # Xetra
+    "fwb": "germany", "fra": "germany",                       # Börse Frankfurt
 }
 
 # Venues TradingView serves for single-symbol TA (tradingview-ta) but NOT via the
@@ -124,6 +152,36 @@ _EXCHANGE_TV_PREFIX: dict = {
     "tpex": "TPEX",
     "tadawul": "TADAWUL",
     "tasi": "TADAWUL",
+    # ── European + Canadian TV symbol prefixes ──
+    "epa": "EURONEXT", "paris": "EURONEXT", "enx": "EURONEXT",
+    "ams": "EURONEXT", "aex": "EURONEXT",
+    "bru": "EURONEXT", "enb": "EURONEXT",
+    "lis": "EURONEXT", "elp": "EURONEXT",
+    "mil": "MIL", "milan": "MIL", "bit": "MIL",
+    "lse": "LSE", "lon": "LSE",
+    "six": "SIX", "swx": "SIX",
+    "bme": "BME",
+    "tsx": "TSX",
+    # Venture listings live under TSXV: "TSX:AMY" returns 0 rows, "TSXV:AMY" data.
+    "tsxv": "TSXV", "xsx": "TSXV", "ventures": "TSXV",
+    # Xetra and Frankfurt are different venues with different prices.
+    "xetra": "XETR", "xetr": "XETR",
+    "fwb": "FWB", "fra": "FWB",
+}
+
+# Exchange aliases that read their venue's coinlist instead of shipping a
+# duplicate file: alias -> canonical name (= the coinlist file's stem).
+COINLIST_ALIASES: dict = {
+    "paris": "epa", "enx": "epa",
+    "aex": "ams",
+    "enb": "bru",
+    "elp": "lis",
+    "milan": "mil", "bit": "mil",
+    "lon": "lse",
+    "swx": "six",
+    "xsx": "tsxv", "ventures": "tsxv",
+    "xetr": "xetra",
+    "fra": "fwb",
 }
 
 _YAHOO_SYMBOL_ALIASES: dict = {
@@ -286,6 +344,16 @@ def resolve_screener_for_symbol(full_symbol: str, exchange: str) -> str:
     """
     prefix = (full_symbol.split(":", 1)[0] if ":" in full_symbol
               else (exchange or "")).strip().lower()
+    if prefix == "euronext":
+        # One prefix, four markets (Paris, Amsterdam, Brussels, Lisbon): the
+        # prefix alone can't pick the screener, so follow the venue the caller
+        # named, defaulting to Paris. Without this EURONEXT:* fell through to
+        # "crypto", found nothing, and venue fallback answered with a
+        # different company sharing the ticker (EPA MC -> NYSE:MC).
+        venue = (exchange or "").strip().lower()
+        if _EXCHANGE_TV_PREFIX.get(venue) == "EURONEXT":
+            return EXCHANGE_SCREENER[venue]
+        return "france"
     return (EXCHANGE_SCREENER.get(prefix)
             or _TA_ONLY_SCREENERS.get(prefix)
             or "crypto")

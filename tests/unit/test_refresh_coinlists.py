@@ -1,11 +1,11 @@
-"""Pure-logic tests for scripts/refresh_us_coinlists.py (no network)."""
+"""Pure-logic tests for scripts/refresh_coinlists.py (no network)."""
 from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
 
-_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "refresh_us_coinlists.py"
-_spec = importlib.util.spec_from_file_location("refresh_us_coinlists", _SCRIPT)
+_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "refresh_coinlists.py"
+_spec = importlib.util.spec_from_file_location("refresh_coinlists", _SCRIPT)
 refresh = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(refresh)
 

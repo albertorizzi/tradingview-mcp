@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the US stock-exchange coinlists from TradingView's scanner.
+"""Regenerate the stock-exchange coinlists from TradingView's scanner.
 
 The coinlist files are the offline symbol universe behind three things: error
 suggestions (``listed_on``), venue auto-fallback (``pick_fallback_exchange``)
@@ -8,10 +8,11 @@ refreshed, so they drifted: listings that moved venue (WMT went NYSE -> NASDAQ
 in December 2025), delisted, or listed since. See #96.
 
 This rebuilds each file as exactly the set of tickers the scanner serves for
-that venue, so every entry is one the tools can actually answer for.
+that venue, so every entry is one the tools can actually answer for. Covers
+the US venues plus the European and Canadian ones added in #95.
 
-    uv run python scripts/refresh_us_coinlists.py           # rewrite the files
-    uv run python scripts/refresh_us_coinlists.py --check   # report drift only; exit 1 if stale
+    uv run python scripts/refresh_coinlists.py           # rewrite the files
+    uv run python scripts/refresh_coinlists.py --check   # report drift only; exit 1 if stale
 """
 from __future__ import annotations
 
@@ -23,8 +24,36 @@ from tradingview_screener import Query, col
 
 COINLIST_DIR = Path(__file__).resolve().parents[1] / "src" / "tradingview_mcp" / "coinlist"
 
-# Venue as the scanner names it -> coinlist file.
-EXCHANGES = {"NASDAQ": "nasdaq.txt", "NYSE": "nyse.txt"}
+STOCKS = ("stock", "dr")
+
+# Coinlist (file stem, upper-cased) -> (scanner market, venue as the scanner
+# names it, instrument types to keep; None keeps every type).
+#
+# The US lists keep every type the scanner serves there, as before. European
+# and Canadian venues are dominated by ETPs and funds (3,199 of Euronext
+# Paris's 3,811 rows are funds), so they keep stocks and depositary receipts:
+# otherwise "top gainers on LSE" would mostly rank leveraged ETPs. The four
+# Euronext venues share the EURONEXT prefix and differ only by market.
+VENUES = {
+    "NASDAQ": ("america", "NASDAQ", None),
+    "NYSE": ("america", "NYSE", None),
+    "EPA": ("france", "EURONEXT", STOCKS),
+    "AMS": ("netherlands", "EURONEXT", STOCKS),
+    "BRU": ("belgium", "EURONEXT", STOCKS),
+    "LIS": ("portugal", "EURONEXT", STOCKS),
+    "MIL": ("italy", "MIL", STOCKS),
+    "LSE": ("uk", "LSE", STOCKS),
+    "SIX": ("switzerland", "SIX", STOCKS),
+    "BME": ("spain", "BME", STOCKS),
+    "TSX": ("canada", "TSX", STOCKS),
+    "TSXV": ("canada", "TSXV", STOCKS),
+    "XETRA": ("germany", "XETR", STOCKS),
+    "FWB": ("germany", "FWB", STOCKS),
+}
+
+
+def coinlist_path(venue: str) -> Path:
+    return COINLIST_DIR / f"{venue.lower()}.txt"
 
 # In tradingview-screener, ``.limit(n)`` sets the END index of the result
 # range, not a page size (``.offset()`` sets the start), so ``.offset(3000)
@@ -38,12 +67,12 @@ RANGE_END = 20_000
 MIN_KEEP_RATIO = 0.6
 
 
-def fetch_live(exchange: str) -> set[str]:
-    """Every ticker the scanner serves for ``exchange``, as ``EXCHANGE:SYMBOL``."""
+def fetch_live(market: str, exchange: str, types: tuple[str, ...] | None = None) -> set[str]:
+    """Every ticker the scanner serves for ``exchange`` in ``market``, as ``EXCHANGE:SYMBOL``."""
     total, df = (
         Query()
-        .set_markets("america")
-        .select("name")
+        .set_markets(market)
+        .select("name", "type")
         .where(col("exchange") == exchange)
         .limit(RANGE_END)
         .get_scanner_data(timeout=60)
@@ -52,6 +81,8 @@ def fetch_live(exchange: str) -> set[str]:
         raise RuntimeError(
             f"{exchange}: scanner returned {len(df)} of {total} rows; raise RANGE_END"
         )
+    if types is not None:
+        df = df[df["type"].isin(types)]
     return {f"{exchange}:{name}" for name in df["name"] if isinstance(name, str) and name}
 
 
@@ -93,8 +124,8 @@ def main() -> int:
     parser.add_argument("--check", action="store_true", help="report drift without writing; exit 1 if stale")
     args = parser.parse_args()
 
-    current = {ex: read_current(COINLIST_DIR / fn) for ex, fn in EXCHANGES.items()}
-    live = {ex: fetch_live(ex) for ex in EXCHANGES}
+    current = {venue: read_current(coinlist_path(venue)) for venue in VENUES}
+    live = {venue: fetch_live(*spec) for venue, spec in VENUES.items()}
     report = plan(current, live)
 
     for ex, diff in report["venues"].items():
@@ -117,8 +148,8 @@ def main() -> int:
         print(f"refusing to write: {', '.join(bad)} shrank below {MIN_KEEP_RATIO:.0%} of the current list")
         return 2
 
-    for ex, fn in EXCHANGES.items():
-        (COINLIST_DIR / fn).write_text("\n".join(sorted(live[ex])) + "\n", encoding="utf-8")
+    for venue in VENUES:
+        coinlist_path(venue).write_text("\n".join(sorted(live[venue])) + "\n", encoding="utf-8")
     print("written")
     return 0
 

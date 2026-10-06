@@ -26,9 +26,21 @@ All notable changes to this project will be documented in this file.
   from the scanner.
 
 ### Added
-- `scripts/refresh_us_coinlists.py` rebuilds the US stock coinlists from the
-  scanner. `--check` reports drift without writing (exit 1 if stale), and a
-  guard refuses to write a list that shrank suspiciously.
+- **European and Canadian stock exchanges** (#95, thanks @Zulimon): Euronext
+  Paris, Amsterdam, Brussels and Lisbon (`EPA`, `AMS`, `BRU`, `LIS`), Borsa
+  Italiana (`MIL`), London (`LSE`), SIX (`SIX`), Madrid (`BME`), Xetra
+  (`XETRA`), Frankfurt (`FWB`), Toronto (`TSX`) and TSX Venture (`TSXV`), plus
+  common aliases. Each routes to its TradingView market and symbol prefix and
+  ships a scanner-generated coinlist (stocks and depositary receipts) for
+  exchange-level scans. Euronext's four markets share one `EURONEXT` prefix,
+  so the market follows the venue the caller named. Venue fallback now stays
+  in the requested venue's market first, so a ticker that exists on both
+  sides of the Atlantic (MC is Moelis on NYSE, LVMH in Paris) doesn't jump
+  continents.
+- `scripts/refresh_coinlists.py` rebuilds the stock coinlists (US, European
+  and Canadian venues) from the scanner. `--check` reports drift without
+  writing (exit 1 if stale), and a guard refuses to write a list that shrank
+  suspiciously.
 
 ## [0.9.0] - 2026-08-26
 
