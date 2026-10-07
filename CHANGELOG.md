@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **TradingView interval codes rejected as timeframes**: `"60"`, `"240"`,
+  `"15"`, `"5"`, `"1440"`, `"D"` and `"W"` are now accepted and mapped to
+  `1h`, `4h`, `15m`, `5m` and `1D` / `1W`. Integrations sending TradingView's
+  native codes used to silently get the tool's default timeframe instead
+  (a `"60"` request returned 15m data), and since 0.9.0's strict validation
+  they got `INVALID_TIMEFRAME`. Unsupported intervals (`30m`, `120`, ...)
+  still fail loudly.
+- **Futures watchlist returned nothing for the main US index futures** (#98):
+  `FUTURES_WATCHLIST` used exchange prefixes TradingView's scanner doesn't
+  index (`CME:ES1!` instead of `CME_MINI:ES1!`, likewise NQ, RTY, YM and EMD,
+  plus livestock under `CBOT` instead of `CME`). A wrong prefix returns 0
+  rows without an error, so `futures_watchlist`, `futures_category_snapshot`
+  and `futures_market_overview` were silently empty for those contracts.
+- **Stale US stock coinlists** (#96): `nasdaq.txt` and `nyse.txt` hadn't been
+  refreshed since 2025. About 1,500 entries were no longer listed on that
+  venue, about 1,600 newer listings were missing, and 18 tickers had moved
+  venue (WMT, AZN, KHC, ETSY, QBTS, QS and others), which broke error
+  suggestions, venue fallback and exchange-level scan coverage. Regenerated
+  from the scanner.
+
+### Added
+- **European and Canadian stock exchanges** (#95, thanks @Zulimon): Euronext
+  Paris, Amsterdam, Brussels and Lisbon (`EPA`, `AMS`, `BRU`, `LIS`), Borsa
+  Italiana (`MIL`), London (`LSE`), SIX (`SIX`), Madrid (`BME`), Xetra
+  (`XETRA`), Frankfurt (`FWB`), Toronto (`TSX`) and TSX Venture (`TSXV`), plus
+  common aliases. Each routes to its TradingView market and symbol prefix and
+  ships a scanner-generated coinlist (stocks and depositary receipts) for
+  exchange-level scans. Euronext's four markets share one `EURONEXT` prefix,
+  so the market follows the venue the caller named. Venue fallback now stays
+  in the requested venue's market first, so a ticker that exists on both
+  sides of the Atlantic (MC is Moelis on NYSE, LVMH in Paris) doesn't jump
+  continents.
+- `scripts/refresh_coinlists.py` rebuilds the stock coinlists (US, European
+  and Canadian venues) from the scanner. `--check` reports drift without
+  writing (exit 1 if stale), and a guard refuses to write a list that shrank
+  suspiciously.
+
 ## [0.9.0] - 2026-08-26
 
 ### Changed (behavior)

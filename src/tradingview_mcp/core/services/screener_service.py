@@ -29,6 +29,7 @@ from tradingview_mcp.core.services.coinlist import exchanges_listing_symbol, loa
 from tradingview_mcp.core.services.indicators import compute_metrics
 from tradingview_mcp.core.utils.validators import (
     EXCHANGE_SCREENER,
+    get_market_type,
     get_tv_exchange_prefix,
 )
 
@@ -546,15 +547,32 @@ def fetch_multi_timeframe_patterns(
 # long-tail tickers this fallback exists for.
 _FALLBACK_VENUE_PREFERENCE = ("KUCOIN", "MEXC", "GATEIO", "BYBIT", "OKX", "HUOBI")
 
+# Where a stock ticker requested on a crypto venue (often just the KUCOIN
+# default) lands. Before the European and Canadian lists existed every such
+# fallback was a US venue; this keeps it that way.
+_STOCK_FALLBACK_FROM_CRYPTO = ("NASDAQ", "NYSE", "AMEX")
+
 
 def pick_fallback_exchange(symbol: str, requested_exchange: str) -> Optional[str]:
-    """Best alternative venue that actually lists `symbol`, or None."""
+    """Best alternative venue that actually lists `symbol`, or None.
+
+    Tickers collide across markets (MC is Moelis on NYSE and LVMH on Euronext
+    Paris), so a venue in the requested venue's own market wins first: a
+    missed NASDAQ request falls back to NYSE, not to whichever European list
+    sorts first. A request made on a crypto venue prefers the US stock venues.
+    Otherwise the crypto preference order, then alphabetical.
+    """
     listed = [e.upper() for e in exchanges_listing_symbol(symbol)]
     req = (requested_exchange or "").upper()
     candidates = [e for e in listed if e != req]
     if not candidates:
         return None
-    for pref in _FALLBACK_VENUE_PREFERENCE:
+    market = get_market_type(req)
+    candidates = [e for e in candidates if get_market_type(e) == market] or candidates
+    preference = _FALLBACK_VENUE_PREFERENCE
+    if market == "crypto":
+        preference += _STOCK_FALLBACK_FROM_CRYPTO
+    for pref in preference:
         if pref in candidates:
             return pref
     return candidates[0]

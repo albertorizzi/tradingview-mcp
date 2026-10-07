@@ -2,7 +2,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from typing import Dict, FrozenSet, List
-from ..utils.validators import COINLIST_DIR
+from ..utils.validators import COINLIST_ALIASES, COINLIST_DIR
 
 
 def load_symbols(exchange: str) -> List[str]:
@@ -17,6 +17,8 @@ def load_symbols(exchange: str) -> List[str]:
 
 @lru_cache(maxsize=64)
 def _load_symbols_cached(exchange: str) -> tuple:
+    # An alias ("paris", "fra") reads its venue's file ("epa", "fwb").
+    exchange = COINLIST_ALIASES.get(exchange.strip().lower(), exchange)
     # Try multiple possible paths
     possible_paths = [
         os.path.join(COINLIST_DIR, f"{exchange}.txt"),
