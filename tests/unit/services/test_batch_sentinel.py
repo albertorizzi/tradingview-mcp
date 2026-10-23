@@ -35,7 +35,7 @@ def _good_indicators() -> dict[str, Any]:
         "volume": 10_000.0,
         "close": 110.0,
         "open": 100.0,        # +10% bar — well above the 3.0% threshold
-        "volume.SMA20": 1_000.0,  # 10x avg — well above the 2x threshold
+        "relative_volume_10d_calc": 10.0,  # 10x avg — well above the 2x threshold
         "RSI": 55.0,
         "BB.upper": 115.0,
         "BB.lower": 95.0,
@@ -43,8 +43,8 @@ def _good_indicators() -> dict[str, Any]:
 
 
 def _make_batch_response(symbols: list[str]) -> dict:
-    """Map ``EXCHANGE:SYMBOL`` -> fake analysis object."""
-    return {s: _FakeAnalysis(indicators=_good_indicators()) for s in symbols}
+    """Map ``EXCHANGE:SYMBOL`` -> scanned columns, as resilient_scan_columns returns."""
+    return {s: _good_indicators() for s in symbols}
 
 
 # --- Tests for volume_breakout_scan -----------------------------------------
@@ -65,7 +65,8 @@ class TestVolumeBreakoutScanSentinel:
             # Mirrors the real upstream "empty body" failure mode.
             raise JSONDecodeError("Expecting value", "", 0)
 
-        with patch.object(scanner_service, "get_multiple_analysis", side_effect=always_fail), \
+        with patch.object(scanner_service, "_SCAN_CHUNK", 100), \
+             patch.object(scanner_service, "resilient_scan_columns", side_effect=always_fail), \
              patch.object(scanner_service, "load_symbols", return_value=[f"SYM{i}" for i in range(250)]):
             with pytest.raises(BatchExecutionError) as exc_info:
                 scanner_service.volume_breakout_scan(
@@ -73,7 +74,7 @@ class TestVolumeBreakoutScanSentinel:
                     timeframe="15m",
                 )
 
-        # batch_size=100 over 250 symbols => 3 batches attempted (100, 100, 50)
+        # 100-symbol chunks over 250 symbols => 3 batches attempted (100, 100, 50)
         assert exc_info.value.batches_attempted == 3
         assert exc_info.value.batches_failed == 3
         assert "Expecting value" in exc_info.value.first_error
@@ -93,9 +94,10 @@ class TestVolumeBreakoutScanSentinel:
             call_count["n"] += 1
             raise JSONDecodeError("Expecting value", "", 0)
 
-        with patch.object(scanner_service, "get_multiple_analysis", side_effect=always_fail), \
+        with patch.object(scanner_service, "_SCAN_CHUNK", 100), \
+             patch.object(scanner_service, "resilient_scan_columns", side_effect=always_fail), \
              patch.object(scanner_service, "load_symbols", return_value=[f"SYM{i}" for i in range(500)]):
-            # batch_size=100 over 500 symbols would normally be 5 batches,
+            # 100-symbol chunks over 500 symbols would normally be 5 batches,
             # but fast-fail should stop us at 2.
             with pytest.raises(BatchExecutionError) as exc_info:
                 scanner_service.volume_breakout_scan(exchange="KUCOIN", timeframe="15m")
@@ -117,13 +119,14 @@ class TestVolumeBreakoutScanSentinel:
         # Pattern: fail, succeed, fail, succeed, fail — never 2 in a row.
         call_log = []
 
-        def alternating(*, screener, interval, symbols):
+        def alternating(screener, interval, symbols, columns):
             call_log.append(len(symbols))
             if len(call_log) % 2 == 1:
                 raise JSONDecodeError("Expecting value", "", 0)
             return _make_batch_response(symbols)
 
-        with patch.object(scanner_service, "get_multiple_analysis", side_effect=alternating), \
+        with patch.object(scanner_service, "_SCAN_CHUNK", 100), \
+             patch.object(scanner_service, "resilient_scan_columns", side_effect=alternating), \
              patch.object(scanner_service, "load_symbols", return_value=[f"SYM{i}" for i in range(500)]):
             # 500 symbols / 100 = 5 batches. Failures alternate, so no two
             # are consecutive → fast-fail must NOT trip → all 5 attempted.
@@ -140,10 +143,11 @@ class TestVolumeBreakoutScanSentinel:
         """Happy path: every batch returns data, no sentinel."""
         from tradingview_mcp.core.services import scanner_service
 
-        def all_good(*, screener, interval, symbols):
+        def all_good(screener, interval, symbols, columns):
             return _make_batch_response(symbols)
 
-        with patch.object(scanner_service, "get_multiple_analysis", side_effect=all_good), \
+        with patch.object(scanner_service, "_SCAN_CHUNK", 100), \
+             patch.object(scanner_service, "resilient_scan_columns", side_effect=all_good), \
              patch.object(scanner_service, "load_symbols", return_value=[f"SYM{i}" for i in range(150)]):
             result = scanner_service.volume_breakout_scan(
                 exchange="KUCOIN",
@@ -164,13 +168,14 @@ class TestVolumeBreakoutScanSentinel:
 
         call_count = {"n": 0}
 
-        def first_fails_rest_ok(*, screener, interval, symbols):
+        def first_fails_rest_ok(screener, interval, symbols, columns):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 raise JSONDecodeError("Expecting value", "", 0)
             return _make_batch_response(symbols)
 
-        with patch.object(scanner_service, "get_multiple_analysis", side_effect=first_fails_rest_ok), \
+        with patch.object(scanner_service, "_SCAN_CHUNK", 100), \
+             patch.object(scanner_service, "resilient_scan_columns", side_effect=first_fails_rest_ok), \
              patch.object(scanner_service, "load_symbols", return_value=[f"SYM{i}" for i in range(250)]):
             # Must NOT raise — partial success is success.
             result = scanner_service.volume_breakout_scan(
@@ -202,8 +207,9 @@ class TestFetchTrendingAnalysisSentinel:
         def always_fail(*_args, **_kwargs):
             raise JSONDecodeError("Expecting value", "", 0)
 
-        # batch_size=200, so 250 symbols => 2 batches attempted.
-        with patch.object(screener_service, "get_multiple_analysis", side_effect=always_fail), \
+        # 200-symbol chunks over 250 symbols => 2 requests attempted.
+        with patch.object(screener_service, "_SCAN_CHUNK", 200), \
+             patch.object(screener_service, "resilient_scan_columns", side_effect=always_fail), \
              patch.object(screener_service, "load_symbols", return_value=[f"S{i}" for i in range(250)]):
             with pytest.raises(BatchExecutionError) as exc_info:
                 screener_service.fetch_trending_analysis(exchange="KUCOIN", timeframe="15m")
@@ -216,31 +222,27 @@ class TestFetchTrendingAnalysisSentinel:
 
         call_count = {"n": 0}
 
-        def second_fails(*, screener, interval, symbols):
+        def second_fails(screener, interval, symbols, columns):
             call_count["n"] += 1
             if call_count["n"] == 2:
                 raise JSONDecodeError("Expecting value", "", 0)
             # First batch returns rich enough data for compute_metrics to pass.
             return {
-                f"KUCOIN:{s}": _FakeAnalysis(
-                    indicators={
-                        "open": 100.0,
-                        "close": 110.0,
-                        "high": 112.0,
-                        "low": 99.0,
-                        "BB.upper": 115.0,
-                        "BB.lower": 95.0,
-                        "SMA20": 105.0,
-                        "EMA50": 100.0,
-                        "RSI": 55.0,
-                        "volume": 1_000_000.0,
-                        "Recommend.All": 0.2,
-                    }
-                )
+                f"KUCOIN:{s}": {
+                    "open": 100.0,
+                    "close": 110.0,
+                    "BB.upper": 115.0,
+                    "BB.lower": 95.0,
+                    "SMA20": 105.0,
+                    "EMA50": 100.0,
+                    "RSI": 55.0,
+                    "volume": 1_000_000.0,
+                }
                 for s in symbols
             }
 
-        with patch.object(screener_service, "get_multiple_analysis", side_effect=second_fails), \
+        with patch.object(screener_service, "_SCAN_CHUNK", 200), \
+             patch.object(screener_service, "resilient_scan_columns", side_effect=second_fails), \
              patch.object(screener_service, "load_symbols", return_value=[f"S{i}" for i in range(250)]):
             result = screener_service.fetch_trending_analysis(exchange="KUCOIN", timeframe="15m", limit=300)
 

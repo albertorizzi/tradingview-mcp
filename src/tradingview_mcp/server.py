@@ -379,9 +379,9 @@ async def volume_breakout_scanner(
     try:
         exchange = validate_exchange(exchange, "KUCOIN")
         timeframe = validate_timeframe(timeframe, "15m")
-        # volume_breakout_scan iterates many batches against the screener
-        # endpoint (sync urllib). Off-load to a worker thread to keep the
-        # event loop responsive for other concurrent tool calls.
+        # volume_breakout_scan makes a blocking whole-exchange scanner
+        # request. Off-load to a worker thread to keep the event loop
+        # responsive for other concurrent tool calls.
         return await asyncio.to_thread(
             volume_breakout_scan,
             exchange, timeframe, volume_multiplier, price_change_min, limit,
@@ -934,7 +934,9 @@ async def stock_extended_hours(symbol: str) -> dict:
         symbol: US stock symbol — AAPL, NVDA, TSLA, SPY, ^GSPC, etc.
 
     Returns:
-        - pre_market: {price, as_of_utc, change_vs_previous_close_pct} or null
+        - pre_market: {price, as_of_utc, change_vs_previous_close_pct, reference_close} or null;
+          the change is measured from reference_close, the last regular close
+          (before the open that is newer than previous_close)
         - regular: {price, as_of_utc, change_pct} (consolidated tape close)
         - post_market: {price, as_of_utc, change_vs_regular_close_pct} or null
         - previous_close, currency, exchange, market_state for context

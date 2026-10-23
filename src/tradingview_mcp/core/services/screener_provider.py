@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import List, Dict, Any, Optional, Tuple
 from ..utils.validators import get_market_type
+from .indicators import AVERAGE_VOLUME, RELATIVE_VOLUME
 import json as _json
 import os as _os
 import random as _random
@@ -337,13 +338,24 @@ def humanize_upstream_error(exc: BaseException) -> str:
     return msg
 
 
-def _scan_with_retry(q, cookies=None, cache_key: Optional[Tuple] = None):
+def _scan_with_retry(
+    q,
+    cookies=None,
+    cache_key: Optional[Tuple] = None,
+    raw: bool = False,
+    throttle: bool = False,
+):
     """Wrap Query.get_scanner_data with retries on transient TV outages.
-    Returns (total, df). Re-raises on non-transient errors or on final failure.
+    Returns (total, df), or the scanner's JSON dict when ``raw`` is True.
+    Re-raises on non-transient errors or on final failure.
 
     If ``cache_key`` is provided and all retries fail, attempts to return a
     stale-but-usable cached payload before raising — callers that pass a key
-    get stale-while-error behavior automatically."""
+    get stale-while-error behavior automatically.
+
+    ``throttle`` holds a tradingview_ta throttle slot for each attempt (not
+    across the backoff sleeps), so heavy whole-exchange scans share the same
+    in-flight cap and start spacing as the per-symbol TA calls."""
     _wait_for_failure_cooldown()
     delays = (0.0,) + _retry_delays()  # immediate try, then back off
     last_exc: Optional[BaseException] = None
@@ -354,7 +366,16 @@ def _scan_with_retry(q, cookies=None, cache_key: Optional[Tuple] = None):
             _time.sleep(wait)
             total_wait += wait
         try:
-            result = q.get_scanner_data(cookies=cookies)
+            if throttle:
+                _ta_throttle_acquire()
+            try:
+                if raw:
+                    result = q.get_scanner_data_raw(cookies=cookies)
+                else:
+                    result = q.get_scanner_data(cookies=cookies)
+            finally:
+                if throttle:
+                    _ta_throttle_release()
             # Populate the cache on success — without this, the advertised
             # stale-while-error fallback below could NEVER fire for callers
             # passing cache_key (nothing was ever stored under it).
@@ -394,20 +415,29 @@ def _scan_with_retry(q, cookies=None, cache_key: Optional[Tuple] = None):
     raise RuntimeError(_format_transient_error(last_exc, len(delays), total_wait)) from last_exc
 
 
+# Scanner columns the indicator helpers read that tradingview_ta doesn't
+# request: the volume baseline (TradingView has no volume-SMA column).
+# tradingview_ta adds the interval suffix to them, as to its own columns.
+TA_EXTRA_COLUMNS = (RELATIVE_VOLUME, AVERAGE_VOLUME)
+
+
 def resilient_get_multiple_analysis(screener, interval, symbols):
     """Drop-in replacement for tradingview_ta.get_multiple_analysis with the
     same resilience layer used by the screener calls (retry + cache + stale
     fallback). Required because coin_analysis / combined_analysis /
     multi_timeframe_analysis use tradingview_ta directly and hit the same
     transient JSON errors when TradingView's scanner endpoint returns an
-    empty body."""
+    empty body.
+
+    Every request also asks for ``TA_EXTRA_COLUMNS``, which land in each
+    ``Analysis.indicators`` under their bare names."""
     try:
         from tradingview_ta import get_multiple_analysis as _gma  # type: ignore
     except Exception as e:
         raise ImportError("tradingview_ta is not installed") from e
 
     sym_key = tuple(sorted(symbols)) if symbols else ()
-    cache_key = ('ta_multi_v1', screener, interval, sym_key)
+    cache_key = ('ta_multi_v2', screener, interval, sym_key)
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -431,6 +461,7 @@ def resilient_get_multiple_analysis(screener, interval, symbols):
                     screener=screener,
                     interval=interval,
                     symbols=symbols,
+                    additional_indicators=list(TA_EXTRA_COLUMNS),
                     timeout=_socket_timeout_s(),
                 )
             finally:
@@ -467,6 +498,152 @@ def resilient_get_multiple_analysis(screener, interval, symbols):
         return payload
     assert last_exc is not None
     raise RuntimeError(_format_transient_error(last_exc, len(delays), total_wait)) from last_exc
+
+
+# Column suffix per timeframe, exactly as tradingview_ta builds it: the daily
+# interval is the bare column ("close", not "close|1D", which the scanner
+# answers with null).
+_TA_INTERVAL_SUFFIX = {
+    '5m': '|5',
+    '15m': '|15',
+    '1h': '|60',
+    '4h': '|240',
+    '1D': '',
+    '1W': '|1W',
+    '1M': '|1M',
+}
+
+
+def resilient_scan_columns(
+    screener: str,
+    interval: str,
+    symbols: List[str],
+    columns: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    """Fetch ``columns`` for every symbol in ONE scanner request.
+
+    The lean path for whole-exchange scans. ``get_multiple_analysis`` asks for
+    ~90 indicator columns and the scanners called it in 200-symbol batches, so
+    a NASDAQ scan (~5,000 tickers) took 25 requests. That burst ran past the
+    30s scan budget and tripped TradingView's empty-body throttling. One
+    request for just the needed columns takes about a second.
+
+    Shares the resilience layer: 60s fresh cache, retry with backoff, failure
+    cooldown and the 6h stale-while-error fallback.
+
+    Args:
+        screener: Scanner market (``"america"``, ``"crypto"``, ``"turkey"``, …).
+        interval: Our timeframe string (``5m`` … ``1M``).
+        symbols:  Fully-qualified tickers (``"NASDAQ:AAPL"``).
+        columns:  Bare column names (``"close"``, ``"SMA20"``, …).
+
+    Returns:
+        ``{ticker: {column: value}}`` keyed by the bare column names, like
+        ``Analysis.indicators``. Values the scanner has no data for are
+        ``None``, and tickers it doesn't know are absent.
+    """
+    from tradingview_screener import Query
+
+    if not symbols:
+        return {}
+    suffix = _TA_INTERVAL_SUFFIX.get(interval, '')
+    cache_key = ('scan_columns_v1', screener, suffix, tuple(columns), tuple(symbols))
+    payload = _cache_get(cache_key)
+    if payload is None:
+        q = (
+            Query()
+            .select(*(c + suffix for c in columns))
+            .set_tickers(*symbols)
+            .set_markets(screener)
+            .limit(len(symbols))
+        )
+        # Callers rank on their own metric; a server-side sort is wasted work.
+        q.query.pop('sort', None)
+        payload = _scan_with_retry(q, cache_key=cache_key, raw=True, throttle=True)
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for row in payload.get('data') or []:
+        if not isinstance(row, dict):
+            continue
+        sym = row.get('s')
+        values = row.get('d')
+        if not sym or not isinstance(values, list) or len(values) != len(columns):
+            continue
+        out[sym] = dict(zip(columns, values))
+    return out
+
+
+def resilient_multi_timeframe_analysis(
+    screener: str,
+    symbol: str,
+    timeframes: List[str],
+) -> Dict[str, Any]:
+    """tradingview_ta ``Analysis`` for ONE symbol on several timeframes, from
+    ONE scanner request.
+
+    multi_timeframe_analysis used to call ``get_multiple_analysis`` once per
+    timeframe and then fetch ATR once per timeframe: ten requests within a few
+    seconds for a single tool call. That is what trips TradingView's
+    empty-body throttling, and on the hosted server about a third of real calls
+    ended with every timeframe failing after ~25s of retries. The scanner
+    accepts the per-interval columns of all timeframes in one request (about
+    470 columns, ~0.2s), ATR included, so this asks once and builds each
+    timeframe's ``Analysis`` locally with tradingview_ta's own ``calculate``.
+
+    Shares the resilience layer: 60s fresh cache, retry with backoff, failure
+    cooldown, the 6h stale-while-error fallback and the TA throttle slot.
+
+    Args:
+        screener:   Scanner market (``"crypto"``, ``"america"``, …).
+        symbol:     Fully-qualified ticker (``"KUCOIN:BTCUSDT"``).
+        timeframes: Our timeframe strings (``1W``, ``1D``, ``4h``, ``1h``, ``15m``…).
+
+    Returns:
+        ``{timeframe: Analysis or None}``: None where the scanner has no data
+        for that timeframe (or for the symbol at all). Raises the resilience
+        layer's terminal error when the request itself keeps failing.
+    """
+    from tradingview_screener import Query
+    from tradingview_ta.main import TradingView, calculate  # type: ignore
+
+    # tradingview_ta's columns in its own order (calculate() reads them by
+    # position), then ours appended at the end as its docs allow. ATR rides in
+    # the same request instead of a follow-up request per timeframe.
+    keys = TradingView.indicators.copy() + list(TA_EXTRA_COLUMNS) + ['ATR']
+    columns = [k + _TA_INTERVAL_SUFFIX.get(tf, '') for tf in timeframes for k in keys]
+    cache_key = ('ta_mtf_v1', screener, symbol, tuple(timeframes))
+    payload = _cache_get(cache_key)
+    if payload is None:
+        q = (
+            Query()
+            .select(*columns)
+            .set_tickers(symbol)
+            .set_markets(screener)
+            .limit(1)
+        )
+        q.query.pop('sort', None)
+        payload = _scan_with_retry(q, cache_key=cache_key, raw=True, throttle=True)
+
+    rows = [r for r in (payload.get('data') or []) if isinstance(r, dict)]
+    row = next((r for r in rows if str(r.get('s', '')).upper() == symbol.upper()), rows[0] if rows else None)
+    values = row.get('d') if row else None
+    exchange, _, ticker = str(row.get('s', symbol) if row else symbol).partition(':')
+
+    out: Dict[str, Any] = {}
+    for i, tf in enumerate(timeframes):
+        if not isinstance(values, list) or len(values) != len(columns):
+            out[tf] = None
+            continue
+        indicators = dict(zip(keys, values[i * len(keys):(i + 1) * len(keys)]))
+        out[tf] = calculate(
+            indicators=indicators,
+            indicators_key=keys,
+            screener=screener,
+            symbol=ticker,
+            exchange=exchange,
+            interval=tf,
+        )
+    return out
 
 
 def _tf_to_tv_resolution(tf: Optional[str]) -> Optional[str]:

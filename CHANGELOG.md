@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **No volume baseline in the TA-based tools** (`coin_analysis`,
+  `multi_timeframe_analysis`, the stock score and trade quality, and the EGX
+  tools): the indicator helpers divided by a `volume.SMA20` column that
+  tradingview_ta never requests and TradingView's scanner doesn't have. The
+  effects:
+  - `volume_analysis` always had a null ratio and a "Normal" signal.
+  - The timeframe context never mentioned volume.
+  - The stock score's volume points, breakout bonus and low-volume penalty
+    never applied, nor did trade quality's volume and liquidity points.
+  - `egx_sector_scanner` showed every sector's flow as "Inflow".
+  - `egx_stock_screener`'s liquidity filter never fired.
+  - `egx_fibonacci_retracement` always returned a null volume ratio.
+
+  The TA fetch now also requests `relative_volume_10d_calc` (the bar's volume
+  over the mean of the previous 10 bars) and `average_volume_10d_calc` (mean
+  volume of the last 10 bars), and the helpers use them. Stock scores and trade
+  quality scores change accordingly. `volume_analysis` gains `average_10`, and
+  `average_20` stays as a null key for compatibility.
+- **Volume tools never saw a volume baseline** (`volume_breakout_scanner`,
+  `smart_volume_scanner`, `volume_confirmation_analysis`): the volume ratio
+  was computed from a `volume.SMA20` column that was never fetched.
+  tradingview_ta doesn't request it, and TradingView's scanner has no
+  volume-SMA field. Since the baseline fallback was removed, the breakout
+  scans skipped every symbol and always returned an empty list, and
+  `volume_confirmation_analysis` always reported a 1.0x ratio. The ratio is
+  now TradingView's relative volume (`relative_volume_10d_calc`): the bar's
+  volume over the mean of the previous 10 bars at that timeframe. The scans
+  also move to a single scanner request for the whole exchange. They used to
+  run 100-symbol batches capped at the first 500 symbols, so on big
+  exchanges only the alphabetical head was scanned.
+- **US-stock scans failed or timed out** (`top_gainers`, `top_losers`,
+  `rating_filter`, `bollinger_scan`): the scans called `get_multiple_analysis`
+  in 200-symbol batches, each asking for ~90 indicator columns, so NASDAQ
+  (~5,000 tickers) took 25 requests and NYSE 14. The burst ran past the 30s
+  scan budget (`PARTIAL_DATA`) or tripped TradingView's empty-body throttling
+  (`ALL_BATCHES_FAILED`), so most NASDAQ/NYSE scans failed, and
+  `bollinger_scan`, which has no budget, could run for minutes. Each scan is
+  now a single scanner request for the eight columns it reads (about a second
+  for NASDAQ), with the same retry, 60s cache and stale-while-error fallback.
+  Results are unchanged.
 - **TradingView interval codes rejected as timeframes**: `"60"`, `"240"`,
   `"15"`, `"5"`, `"1440"`, `"D"` and `"W"` are now accepted and mapped to
   `1h`, `4h`, `15m`, `5m` and `1D` / `1W`. Integrations sending TradingView's

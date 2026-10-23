@@ -86,7 +86,17 @@ def _shape_extended_hours(symbol: str, data: dict) -> dict:
     # Prefer the meta `regularMarketPrice` (consolidated tape); fall back to
     # latest 1m candle if meta missing.
     regular_close = meta.get("regularMarketPrice") or regular_price_intraday
+
     previous_close = meta.get("previousClose") or meta.get("chartPreviousClose")
+
+    # Before the open, Yahoo's `previousClose`/`chartPreviousClose` still refer to
+    # the session before last while the pre-market bars already belong to the new
+    # day, so the pre-market change is measured against the last regular close
+    # (`regularMarketPrice`) instead. `previous_close` and the regular change keep
+    # Yahoo's reference: before the open they describe the last session's own move.
+    regular_market_time = meta.get("regularMarketTime")
+    pre_open = regular_market_time is not None and regular_market_time < regular_start
+    pre_reference = regular_close if pre_open and regular_close is not None else previous_close
 
     out = {
         "symbol": symbol.upper(),
@@ -104,7 +114,8 @@ def _shape_extended_hours(symbol: str, data: dict) -> dict:
         out["pre_market"] = {
             "price": pre_price,
             "as_of_utc": _fmt_time(pre_time),
-            "change_vs_previous_close_pct": _change_pct(pre_price, previous_close),
+            "change_vs_previous_close_pct": _change_pct(pre_price, pre_reference),
+            "reference_close": pre_reference,
         }
 
     if regular_close is not None:
